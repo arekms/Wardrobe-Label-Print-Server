@@ -1,29 +1,71 @@
+// ============================================================================
+// DATABASE SERVICE - SQL Server Connection and Query Management
+// ============================================================================
+// This service handles all database interactions including:
+// - Connection pool management to SQL Server
+// - Execution of stored procedures for label processing
+// - Legacy query methods for historical compatibility
+// ============================================================================
+
 const sql = require('mssql');
 const logger = require('../utils/logger');
 
+/**
+ * Service class for managing SQL Server database connections and operations
+ * Uses connection pooling for efficient resource management
+ */
 class DatabaseService {
   constructor() {
-    // Configure for SQL Server authentication (username/password)
-    // IMPORTANT: Credentials are hardcoded to prevent system env vars from interfering
-    // (System may have DB_DATABASE=helpdesk from other projects, would cause failures)
+    /**
+     * SQL Server connection configuration loaded from namespaced environment variables
+     * WLPS_ prefix prevents conflicts with system env vars and other projects
+     * NO HARDCODED FALLBACK VALUES - All credentials must come from .env file
+     */
+    
+    // Validate required environment variables are set
+    const requiredVars = ['WLPS_DB_SERVER', 'WLPS_DB_DATABASE', 'WLPS_DB_USERNAME', 'WLPS_DB_PASSWORD'];
+    const missingVars = requiredVars.filter(v => !process.env[v]);
+    
+    if (missingVars.length > 0) {
+      throw new Error(`Missing required environment variables: ${missingVars.join(', ')}. Please configure .env file.`);
+    }
+    
+    // Database credentials from environment with WLPS_ namespace
+    const dbServer = process.env.WLPS_DB_SERVER;
+    const dbDatabase = process.env.WLPS_DB_DATABASE;
+    const dbUsername = process.env.WLPS_DB_USERNAME;
+    const dbPassword = process.env.WLPS_DB_PASSWORD;
+    const dbEncrypt = process.env.WLPS_DB_ENCRYPT === 'true' ? true : false;
+    const dbTrustCert = process.env.WLPS_DB_TRUST_CERT !== 'false' ? true : false;
+    const dbTimeout = parseInt(process.env.WLPS_DB_CONNECT_TIMEOUT || '30000', 10);
+    
     this.config = {
-      server: 'av-sql2',
-      database: 'Wardrobe01Prod',
-      user: 'Wardrobe',
-      password: 'FQq@Y67*Vaim',
+      server: dbServer,                           // SQL Server hostname from WLPS_DB_SERVER
+      database: dbDatabase,                       // Database name from WLPS_DB_DATABASE
+      user: dbUsername,                           // Username from WLPS_DB_USERNAME
+      password: dbPassword,                       // Password from WLPS_DB_PASSWORD
       options: {
-        encrypt: false, // Set to false for local network connections
-        trustServerCertificate: true,
-        connectTimeout: 30000,
-        requestTimeout: 30000
+        encrypt: dbEncrypt,                       // From WLPS_DB_ENCRYPT (default: false for local)
+        trustServerCertificate: dbTrustCert,      // From WLPS_DB_TRUST_CERT (default: true)
+        connectTimeout: dbTimeout,                // From WLPS_DB_CONNECT_TIMEOUT (default: 30s)
+        requestTimeout: 30000                     // Fixed: 30 second request timeout
       }
     };
+    
+    // Connection pool will be initialized when connect() is called
     this.pool = null;
   }
 
+  /**
+   * Establishes connection to SQL Server using configured credentials
+   * Creates a connection pool for efficient resource management
+   * @throws {Error} If connection fails
+   */
   async connect() {
     try {
+      // Initialize connection pool with configured SQL Server settings
       this.pool = new sql.ConnectionPool(this.config);
+      // Establish actual connection to the database
       await this.pool.connect();
       logger.info('Connected to SQL Server database');
     } catch (error) {
@@ -32,9 +74,14 @@ class DatabaseService {
     }
   }
 
+  /**
+   * Closes the database connection pool gracefully
+   * Should be called during application shutdown
+   */
   async disconnect() {
     try {
       if (this.pool) {
+        // Close all connections in the pool
         await this.pool.close();
         logger.info('Disconnected from database');
       }
@@ -43,11 +90,21 @@ class DatabaseService {
     }
   }
 
+  /**
+   * Executes the stored procedure USP_ProcessLabelPrint_2026 to process label queue
+   * This stored procedure handles:
+   * - Retrieval of pending label print jobs from LabelPrintQueue
+   * - Data assembly with item details (barcode, size, color, template, etc.)
+   * - Two-phase processing: validation phase followed by execution phase
+   * - RunCount tracking to manage multi-phase processing within a single cycle
+   * 
+   * @returns {Array} Array of label objects ready for printing
+   * @throws {Error} If stored procedure execution fails
+   */
   async processLabelQueue() {
     try {
-      // Call the stored procedure USP_ProcessLabelPrint_2026
-      // This procedure handles all label processing logic including
-      // barcode generation, data assembly, and history tracking
+      // Execute the stored procedure (no parameters required)
+      // The procedure internally handles querying LabelPrintQueue and joining related tables
       const result = await this.pool
         .request()
         .execute('USP_ProcessLabelPrint_2026');
@@ -60,30 +117,23 @@ class DatabaseService {
     }
   }
 
-  async getNewEntries() {
-    try {
-      const result = await this.pool
-        .request()
-        .query(`
-          SELECT TOP 100 
-            lpq.LabelPrintQueueID,
-            lpq.ItemID,
-            lpq.Quantity,
-            lpq.CreateDate
-          FROM [dbo].[LabelPrintQueue] lpq
-          WHERE lpq.PrintDate IS NULL
-          ORDER BY lpq.CreateDate ASC
-        `);
-
-      return result.recordset;
-    } catch (error) {
-      logger.error('Error fetching new entries', { error: error.message });
-      throw error;
-    }
-  }
-
+  /**
+   * Legacy method: Retrieves additional item information for a given ItemID
+   * Kept for backward compatibility - functionality now handled by stored procedure
+   * 
+   * Joins multiple tables to assemble complete item details:
+   * - Item: Contains barcode and template reference
+   * - ItemTemplate: Contains size and color IDs
+   * - ItemClass: Contains item classification
+   * - ItemDepartment: Contains department information
+   * 
+   * @param {number} itemId - The ItemID to fetch information for
+   * @returns {Object} Item object with barcode, size, color, template, class, and department info
+   * @throws {Error} If query fails
+   */
   async getAdditionalInfo(itemId) {
     try {
+      // Query and join multiple tables to get complete item information
       const result = await this.pool
         .request()
         .input('itemId', sql.Int, itemId)
@@ -111,8 +161,20 @@ class DatabaseService {
     }
   }
 
+  /**
+   * Legacy method: Marks a queue entry as processed
+   * Kept for backward compatibility - functionality now handled by stored procedure
+   * 
+   * Updates the LabelPrintQueue entry by setting:
+   * - PrintDate to current timestamp (marks as processed)
+   * - Increments RunCount (tracks processing attempts)
+   * 
+   * @param {number} queueId - The LabelPrintQueueID to mark as processed
+   * @throws {Error} If update fails
+   */
   async markAsProcessed(queueId) {
     try {
+      // Update the queue entry with current timestamp and increment run counter
       await this.pool
         .request()
         .input('queueId', sql.Int, queueId)

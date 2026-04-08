@@ -16,7 +16,7 @@ A Node.js application that continuously polls a Microsoft SQL Server database fo
 
 - Node.js (v14 or higher)
 - Microsoft SQL Server
-- GoDexRT700i printer accessible on local network at 10.2.1.61
+- GoDexRT700i printer accessible on local network 
 - npm or yarn package manager
 
 ## Installation
@@ -143,9 +143,9 @@ table joins and select columns in `services/databaseService.js`
 
 **DatabaseService:**
 - `connect()` - Connect to SQL Server
-- `getNewEntries()` - Query LabelPrintQueue for pending prints
-- `getAdditionalInfo(itemId)` - Fetch label data via joined query
-- `markAsProcessed(queueId)` - Update PrintDate after printing
+- `processLabelQueue()` - Execute USP_ProcessLabelPrint_2026 stored procedure for continuous polling
+- `getAdditionalInfo(itemId)` - Fetch label data via joined query (legacy, not actively used)
+- `markAsProcessed(queueId)` - Update PrintDate after printing (legacy, not actively used)
 
 **PrinterService:**
 - `connect()` - Test connection t av-sql2
